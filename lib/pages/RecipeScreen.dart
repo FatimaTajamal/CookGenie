@@ -1,17 +1,15 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
+import 'package:permission_handler/permission_handler.dart';
 import 'RecipeSearch.dart';
 import 'saved_recipes_screen.dart';
-import 'package:flutter/material.dart';
-import 'storage_service.dart'; // Import the storage service.
-
-
 
 class RecipeScreen extends StatefulWidget {
   final List<Map<String, dynamic>> savedRecipes;
 
-  const RecipeScreen({super.key, required this.savedRecipes});
+  const RecipeScreen({Key? key, required this.savedRecipes}) : super(key: key);
 
   @override
   _RecipeScreenState createState() => _RecipeScreenState();
@@ -20,8 +18,10 @@ class RecipeScreen extends StatefulWidget {
 class _RecipeScreenState extends State<RecipeScreen> {
   final TextEditingController _controller = TextEditingController();
   final FlutterTts _tts = FlutterTts();
-  Map<String, dynamic>? _recipe;
+  late stt.SpeechToText _speech;
+
   bool _isSpeaking = false;
+  bool _isListening = false;
   bool _hasSearched = false;
   bool _isLoading = false;
   bool _isFavorite = false;
@@ -31,23 +31,24 @@ class _RecipeScreenState extends State<RecipeScreen> {
   int _currentTextIndex = 0;
   List<String> _formattedTextParts = [];
 
+  Map<String, dynamic>? _recipe;
+
   @override
   void initState() {
     super.initState();
+    _speech = stt.SpeechToText();
     _tts.setVolume(1.0);
     _tts.setSpeechRate(_speechRate);
     _tts.setPitch(1.0);
     _tts.setCompletionHandler(() {
-      setState(() {
-        _isSpeaking = false;
-      });
+      setState(() => _isSpeaking = false);
     });
   }
 
   @override
   void dispose() {
-    _tts.stop(); // Stops TTS playback when leaving the screen
-    _controller.dispose(); // Dispose of text controller
+    _tts.stop();
+    _controller.dispose();
     super.dispose();
   }
 
@@ -75,9 +76,6 @@ class _RecipeScreenState extends State<RecipeScreen> {
         _formattedTextParts.clear();
         _isLoading = false;
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Recipe not found')),
-      );
     }
   }
 
@@ -135,6 +133,72 @@ class _RecipeScreenState extends State<RecipeScreen> {
     });
   }
 
+  Future<void> _listen() async {
+    if (kIsWeb) {
+      _startListening();
+      return;
+    }
+
+    var status = await Permission.microphone.status;
+    if (!status.isGranted) {
+      status = await Permission.microphone.request();
+      if (!status.isGranted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Microphone permission denied')),
+        );
+        return;
+      }
+    }
+
+    _startListening();
+  }
+
+  void _startListening() async {
+    if (_speech.isListening) {
+      await _speech.stop();
+      setState(() => _isListening = false);
+      return;
+    }
+
+    bool available = await _speech.initialize(
+      onStatus: (val) => _onSpeechStatus(val),
+      onError: (val) => _onSpeechError(val),
+    );
+
+    if (available) {
+      setState(() => _isListening = true);
+      _speech.listen(
+        onResult: (val) async {
+          if (val.finalResult) {
+            setState(() {
+              _controller.text = val.recognizedWords;
+              _isListening = false;
+              _isLoading = true;
+            });
+            await _speech.stop();
+            await _searchRecipe(val.recognizedWords);
+          } else {
+            setState(() {
+              _controller.text = val.recognizedWords;
+            });
+          }
+        },
+        listenFor: const Duration(seconds: 5),
+        pauseFor: const Duration(seconds: 3),
+      );
+    }
+  }
+
+  void _onSpeechStatus(String status) {
+    if (status == 'done') {
+      setState(() => _isListening = false);
+    }
+  }
+
+  void _onSpeechError(dynamic error) {
+    setState(() => _isListening = false);
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -145,13 +209,46 @@ class _RecipeScreenState extends State<RecipeScreen> {
         padding: const EdgeInsets.all(16),
         child: Column(
           children: [
-            TextField(
-              controller: _controller,
-              decoration: const InputDecoration(
-                labelText: "Enter recipe name",
-                border: OutlineInputBorder(),
-              ),
-              onSubmitted: _searchRecipe,
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _controller,
+                    decoration: const InputDecoration(
+                      labelText: "Enter recipe name",
+                      border: OutlineInputBorder(),
+                    ),
+                    onSubmitted: _searchRecipe,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 500),
+                  width: _isListening ? 70 : 60,
+                  height: _isListening ? 70 : 60,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: _isListening ? Colors.redAccent : Colors.blue,
+                    boxShadow: _isListening
+                        ? [
+                            BoxShadow(
+                              color: Colors.redAccent.withOpacity(0.6),
+                              spreadRadius: 8,
+                              blurRadius: 12,
+                            )
+                          ]
+                        : [],
+                  ),
+                  child: GestureDetector(
+                    onTap: _listen,
+                    child: Icon(
+                      _isListening ? Icons.mic : Icons.mic_none,
+                      color: Colors.white,
+                      size: 30,
+                    ),
+                  ),
+                ),
+              ],
             ),
             const SizedBox(height: 16),
             Expanded(
@@ -159,57 +256,57 @@ class _RecipeScreenState extends State<RecipeScreen> {
                   ? _isLoading
                       ? const Center(child: CircularProgressIndicator())
                       : _recipe != null
-                          ? SingleChildScrollView(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Row(
-                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                    children: [
-                                      Text('Recipe: ${_recipe!['name']}',
-                                          style: const TextStyle(
-                                              fontSize: 20, fontWeight: FontWeight.bold)),
-                                      IconButton(
-                                        icon: Icon(
-                                          _isFavorite ? Icons.favorite : Icons.favorite_border,
-                                          color: _isFavorite ? Colors.red : null,
-                                        ),
-                                        onPressed: _toggleFavorite,
-                                      ),
-                                    ],
-                                  ),
-                                  const SizedBox(height: 10),
-                                  const Text('Ingredients:',
-                                      style: TextStyle(fontWeight: FontWeight.bold)),
-                                  ..._recipe!['ingredients'].map<Widget>((i) =>
-                                      Text('${i['name']} - ${i['quantity']}')),
-                                  const SizedBox(height: 10),
-                                  const Text('Instructions:',
-                                      style: TextStyle(fontWeight: FontWeight.bold)),
-                                  ..._recipe!['instructions'].map<Widget>((s) => Text(s)),
-                                  const SizedBox(height: 20),
-                                  Row(
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    children: [
-                                      IconButton(icon: const Icon(Icons.fast_rewind), onPressed: _rewind),
-                                      IconButton(
-                                        icon: Icon(
-                                            _isSpeaking ? Icons.pause : Icons.play_arrow),
-                                        onPressed: () {
-                                          _isSpeaking ? _pauseTTS() : _playTTS();
-                                        },
-                                      ),
-                                      IconButton(icon: const Icon(Icons.fast_forward), onPressed: _fastForward),
-                                    ],
-                                  )
-                                ],
-                              ),
-                            )
+                          ? _buildRecipeDetails()
                           : const Center(child: Text('No recipe found.'))
                   : const Center(child: Text('Search for a recipe to begin.')),
-            )
+            ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildRecipeDetails() {
+    return SingleChildScrollView(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text('Recipe: ${_recipe!['name']}',
+                  style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+              IconButton(
+                icon: Icon(
+                  _isFavorite ? Icons.favorite : Icons.favorite_border,
+                  color: _isFavorite ? Colors.red : null,
+                ),
+                onPressed: _toggleFavorite,
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          const Text('Ingredients:', style: TextStyle(fontWeight: FontWeight.bold)),
+          ..._recipe!['ingredients'].map<Widget>((i) =>
+              Text('${i['name']} - ${i['quantity']}')).toList(),
+          const SizedBox(height: 10),
+          const Text('Instructions:', style: TextStyle(fontWeight: FontWeight.bold)),
+          ..._recipe!['instructions'].map<Widget>((s) => Text(s)).toList(),
+          const SizedBox(height: 20),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              IconButton(icon: const Icon(Icons.fast_rewind), onPressed: _rewind),
+              IconButton(
+                icon: Icon(_isSpeaking ? Icons.pause : Icons.play_arrow),
+                onPressed: () {
+                  _isSpeaking ? _pauseTTS() : _playTTS();
+                },
+              ),
+              IconButton(icon: const Icon(Icons.fast_forward), onPressed: _fastForward),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -219,6 +316,10 @@ class _RecipeScreenState extends State<RecipeScreen> {
 
 
 // class RecipeScreen extends StatefulWidget {
+//   final List<Map<String, dynamic>> savedRecipes;
+
+//   const RecipeScreen({super.key, required this.savedRecipes});
+
 //   @override
 //   _RecipeScreenState createState() => _RecipeScreenState();
 // }
@@ -230,6 +331,8 @@ class _RecipeScreenState extends State<RecipeScreen> {
 //   bool _isSpeaking = false;
 //   bool _hasSearched = false;
 //   bool _isLoading = false;
+//   bool _isFavorite = false;
+
 //   String _ttsText = "";
 //   double _speechRate = 0.5;
 //   int _currentTextIndex = 0;
@@ -248,6 +351,13 @@ class _RecipeScreenState extends State<RecipeScreen> {
 //     });
 //   }
 
+//   @override
+//   void dispose() {
+//     _tts.stop(); // Stops TTS playback when leaving the screen
+//     _controller.dispose(); // Dispose of text controller
+//     super.dispose();
+//   }
+
 //   Future<void> _searchRecipe(String query) async {
 //     setState(() {
 //       _hasSearched = true;
@@ -259,6 +369,7 @@ class _RecipeScreenState extends State<RecipeScreen> {
 //     if (recipe != null) {
 //       setState(() {
 //         _recipe = recipe;
+//         _isFavorite = widget.savedRecipes.any((r) => r['name'] == recipe['name']);
 //         _ttsText = _formatRecipe(recipe);
 //         _formattedTextParts = _ttsText.split(RegExp(r'(?<=[.!?])\s+'));
 //         _currentTextIndex = 0;
@@ -272,7 +383,7 @@ class _RecipeScreenState extends State<RecipeScreen> {
 //         _isLoading = false;
 //       });
 //       ScaffoldMessenger.of(context).showSnackBar(
-//         SnackBar(content: Text('Recipe not found')),
+//         const SnackBar(content: Text('Recipe not found')),
 //       );
 //     }
 //   }
@@ -293,19 +404,15 @@ class _RecipeScreenState extends State<RecipeScreen> {
 
 //   void _playTTS() {
 //     if (_currentTextIndex < _formattedTextParts.length) {
-//       String textToRead = _formattedTextParts.sublist(_currentTextIndex).join(' ');
+//       final textToRead = _formattedTextParts.sublist(_currentTextIndex).join(' ');
 //       _tts.speak(textToRead);
-//       setState(() {
-//         _isSpeaking = true;
-//       });
+//       setState(() => _isSpeaking = true);
 //     }
 //   }
 
 //   void _pauseTTS() {
 //     _tts.stop();
-//     setState(() {
-//       _isSpeaking = false;
-//     });
+//     setState(() => _isSpeaking = false);
 //   }
 
 //   void _rewind() {
@@ -322,24 +429,24 @@ class _RecipeScreenState extends State<RecipeScreen> {
 //     }
 //   }
 
-//   @override
-//   void dispose() {
-//     _controller.dispose();
-//     _tts.stop();
-//     super.dispose();
+//   void _toggleFavorite() {
+//     if (_recipe == null) return;
+//     setState(() {
+//       if (_isFavorite) {
+//         widget.savedRecipes.removeWhere((r) => r['name'] == _recipe!['name']);
+//         _isFavorite = false;
+//       } else {
+//         widget.savedRecipes.add(_recipe!);
+//         _isFavorite = true;
+//       }
+//     });
 //   }
 
 //   @override
 //   Widget build(BuildContext context) {
 //     return Scaffold(
 //       appBar: AppBar(
-//         title: Text('Cook Genie'),
-//         actions: [
-//           IconButton(
-//             icon: Icon(Icons.search),
-//             onPressed: () => _searchRecipe(_controller.text),
-//           ),
-//         ],
+//         title: const Text('Cook Genie'),
 //       ),
 //       body: Padding(
 //         padding: const EdgeInsets.all(16),
@@ -347,7 +454,7 @@ class _RecipeScreenState extends State<RecipeScreen> {
 //           children: [
 //             TextField(
 //               controller: _controller,
-//               decoration: InputDecoration(
+//               decoration: const InputDecoration(
 //                 labelText: "Enter recipe name",
 //                 border: OutlineInputBorder(),
 //               ),
@@ -357,58 +464,56 @@ class _RecipeScreenState extends State<RecipeScreen> {
 //             Expanded(
 //               child: _hasSearched
 //                   ? _isLoading
-//                       ? Center(child: CircularProgressIndicator())
+//                       ? const Center(child: CircularProgressIndicator())
 //                       : _recipe != null
 //                           ? SingleChildScrollView(
 //                               child: Column(
 //                                 crossAxisAlignment: CrossAxisAlignment.start,
 //                                 children: [
-//                                   Text('Recipe: ${_recipe!['name']}',
-//                                       style: TextStyle(
-//                                           fontSize: 20,
-//                                           fontWeight: FontWeight.bold)),
-//                                   SizedBox(height: 10),
-//                                   Text('Ingredients:',
-//                                       style: TextStyle(
-//                                           fontWeight: FontWeight.bold)),
-//                                   ..._recipe!['ingredients']
-//                                       .map<Widget>((i) => Text('${i['name']} - ${i['quantity']}')),
-//                                   SizedBox(height: 10),
-//                                   Text('Instructions:',
-//                                       style: TextStyle(
-//                                           fontWeight: FontWeight.bold)),
-//                                   ..._recipe!['instructions']
-//                                       .map<Widget>((s) => Text(s)),
+//                                   Row(
+//                                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
+//                                     children: [
+//                                       Text('Recipe: ${_recipe!['name']}',
+//                                           style: const TextStyle(
+//                                               fontSize: 20, fontWeight: FontWeight.bold)),
+//                                       IconButton(
+//                                         icon: Icon(
+//                                           _isFavorite ? Icons.favorite : Icons.favorite_border,
+//                                           color: _isFavorite ? Colors.red : null,
+//                                         ),
+//                                         onPressed: _toggleFavorite,
+//                                       ),
+//                                     ],
+//                                   ),
+//                                   const SizedBox(height: 10),
+//                                   const Text('Ingredients:',
+//                                       style: TextStyle(fontWeight: FontWeight.bold)),
+//                                   ..._recipe!['ingredients'].map<Widget>((i) =>
+//                                       Text('${i['name']} - ${i['quantity']}')),
+//                                   const SizedBox(height: 10),
+//                                   const Text('Instructions:',
+//                                       style: TextStyle(fontWeight: FontWeight.bold)),
+//                                   ..._recipe!['instructions'].map<Widget>((s) => Text(s)),
 //                                   const SizedBox(height: 20),
 //                                   Row(
 //                                     mainAxisAlignment: MainAxisAlignment.center,
 //                                     children: [
-//                                       IconButton(
-//                                         icon: Icon(Icons.fast_rewind),
-//                                         onPressed: _rewind,
-//                                       ),
+//                                       IconButton(icon: const Icon(Icons.fast_rewind), onPressed: _rewind),
 //                                       IconButton(
 //                                         icon: Icon(
 //                                             _isSpeaking ? Icons.pause : Icons.play_arrow),
 //                                         onPressed: () {
-//                                           if (_isSpeaking) {
-//                                             _pauseTTS();
-//                                           } else {
-//                                             _playTTS();
-//                                           }
+//                                           _isSpeaking ? _pauseTTS() : _playTTS();
 //                                         },
 //                                       ),
-//                                       IconButton(
-//                                         icon: Icon(Icons.fast_forward),
-//                                         onPressed: _fastForward,
-//                                       ),
+//                                       IconButton(icon: const Icon(Icons.fast_forward), onPressed: _fastForward),
 //                                     ],
 //                                   )
 //                                 ],
 //                               ),
 //                             )
-//                           : Center(child: Text('No recipe found.'))
-//                   : Center(child: Text('Search for a recipe to begin.')),
+//                           : const Center(child: Text('No recipe found.'))
+//                   : const Center(child: Text('Search for a recipe to begin.')),
 //             )
 //           ],
 //         ),
@@ -416,5 +521,3 @@ class _RecipeScreenState extends State<RecipeScreen> {
 //     );
 //   }
 // }
-
-
